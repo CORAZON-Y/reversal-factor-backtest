@@ -1,0 +1,19 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+
+# Raw data is too large for the code repository.
+basic_data/
+!basic_data/数据说明.txt
+
+# Keep only selected first-stage results for submission.
+output/*
+!output/
+!output/*.png
+!output/ic_summary.csv
+
+第二题/expected_returns.parquet
+第二题/expected_factor_returns.csv
+第二题/optimized_portfolio/
+第二题/optimized_portfolio_test/
