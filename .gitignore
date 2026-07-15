@@ -1,19 +1,17 @@
 .DS_Store
 __pycache__/
 *.py[cod]
-.venv/
+.venv*/
+.cache/
 
 # Raw data is too large for the code repository.
 basic_data/
-!basic_data/数据说明.txt
 
-# Keep only selected first-stage results for submission.
+# Keep generated result figures, but ignore other output artifacts.
 output/*
-!output/
+!output/**/
 !output/*.png
-!output/ic_summary.csv
+!output/**/*.png
 
-第二题/expected_returns.parquet
-第二题/expected_factor_returns.csv
-第二题/optimized_portfolio/
-第二题/optimized_portfolio_test/
+# Local portfolio optimization test outputs.
+二次规划组合优化/optimized_portfolio_test/

@@ -19,14 +19,14 @@ def winsorize_mad(series: pd.Series, n_mad: float = 3.0) -> pd.Series:
         lower = series.quantile(0.01)
         upper = series.quantile(0.99)
     else:
-        width = n_mad * 1.4826 * mad
+        width = n_mad * mad
         lower = median - width
         upper = median + width
     return series.clip(lower=lower, upper=upper)
 
 
-def zscore(series: pd.Series) -> pd.Series:
-    cleaned = winsorize_mad(series)
+def zscore(series: pd.Series, n_mad: float = 3.0) -> pd.Series:
+    cleaned = winsorize_mad(series, n_mad=n_mad)
     std = cleaned.std(ddof=0)
     if not np.isfinite(std) or std <= 0:
         return pd.Series(np.nan, index=series.index)
@@ -42,10 +42,10 @@ def rank_zscore(series: pd.Series) -> pd.Series:
     return centered / std
 
 
-def standardize_factors(df: pd.DataFrame) -> pd.DataFrame:
+def standardize_factors(df: pd.DataFrame, n_mad: float = 3.0) -> pd.DataFrame:
     out = df.copy()
     by_date = out.groupby("date", sort=False)["factor"]
-    out["factor_zscore"] = by_date.transform(zscore)
+    out["factor_zscore"] = by_date.transform(zscore, n_mad=n_mad)
     out["factor_rank_zscore"] = by_date.transform(rank_zscore)
     return out
 

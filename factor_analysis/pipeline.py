@@ -20,7 +20,7 @@ from factor_analysis.outputs import save_outputs, save_processed_data
 
 
 def build_processed_data(config: PipelineConfig) -> pd.DataFrame:
-    config.output_dir.mkdir(parents=True, exist_ok=True)
+    config.cache_dir.mkdir(parents=True, exist_ok=True)
 
     daily = load_daily_data(config)
     industry = load_industry_data(config)
@@ -28,7 +28,7 @@ def build_processed_data(config: PipelineConfig) -> pd.DataFrame:
     suspension_flags = load_suspension_flags(config)
 
     processed = build_factor_dataset(daily, industry, st_flags, suspension_flags, config)
-    processed = standardize_factors(processed)
+    processed = standardize_factors(processed, n_mad=config.winsor_mad_n)
     processed = neutralize_factors(processed, ["factor_zscore", "factor_rank_zscore"], config)
     return processed
 
@@ -46,7 +46,7 @@ def run_pipeline(config: PipelineConfig) -> dict[str, pd.DataFrame]:
     ic_df = calculate_ic(processed, factors)
     ic_summary = summarize_ic(ic_df)
     group_returns, cumulative, backtest_summary = run_group_backtest(processed, factors, config)
-    save_outputs(processed, ic_df, ic_summary, group_returns, cumulative, backtest_summary, config)
+    save_outputs(processed, ic_df, cumulative, config)
 
     return {
         "processed": processed,

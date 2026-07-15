@@ -2,7 +2,7 @@
 
 每个调仓日执行以下流程：
 
-1. 按 `factor_zscore` 从高到低选出前 N 只股票。
+1. 按 `factor_rank_zscore` 从高到低选出前 N 只股票。
 2. 使用候选股票过去一段时间的真实收益估计协方差矩阵。
 3. 在风险和权重约束下，最大化组合预期收益。
 4. 用下一期真实收益计算组合回测表现。
@@ -34,9 +34,12 @@ from scipy.optimize import linprog, minimize
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_EXPECTED_RETURN_FILE = ROOT_DIR / "第二题" / "expected_returns.parquet"
-DEFAULT_PROCESSED_DATA_FILE = ROOT_DIR / "output" / "processed_data.parquet"
-DEFAULT_OUTPUT_DIR = ROOT_DIR / "第二题" / "optimized_portfolio"
+CACHE_ROOT_DIR = ROOT_DIR / ".cache"
+FACTOR_CACHE_DIR = CACHE_ROOT_DIR / "单因子回测"
+OPTIMIZATION_CACHE_DIR = CACHE_ROOT_DIR / "二次规划组合优化"
+DEFAULT_EXPECTED_RETURN_FILE = OPTIMIZATION_CACHE_DIR / "expected_returns.parquet"
+DEFAULT_PROCESSED_DATA_FILE = FACTOR_CACHE_DIR / "processed_data.parquet"
+DEFAULT_OUTPUT_DIR = ROOT_DIR / "output" / "二次规划组合优化"
 
 
 @dataclass(frozen=True)
@@ -44,13 +47,13 @@ class OptimizationConfig:
     expected_return_file: Path = DEFAULT_EXPECTED_RETURN_FILE
     processed_data_file: Path = DEFAULT_PROCESSED_DATA_FILE
     output_dir: Path = DEFAULT_OUTPUT_DIR
-    factor_col: str = "factor_zscore"
+    factor_col: str = "factor_rank_zscore"
     industry_col: str = "industry_level1"
     candidate_count: int = 100
     risk_window: int = 60
     min_history: int = 20
     max_variance: float = 0.0004
-    max_weight: float = 0.05
+    max_weight: float = 0.03
     max_industry_weight: float = 0.20
     shrinkage: float = 0.20
     trading_days_per_year: int = 252
@@ -59,10 +62,31 @@ class OptimizationConfig:
     max_dates: int | None = None
 
 
+def validate_config(config: OptimizationConfig) -> None:
+    if config.candidate_count <= 0:
+        raise ValueError("candidate_count must be positive")
+    if config.risk_window <= 0:
+        raise ValueError("risk_window must be positive")
+    if config.min_history <= 1 or config.min_history > config.risk_window:
+        raise ValueError("min_history must be between 2 and risk_window")
+    if config.max_variance <= 0:
+        raise ValueError("max_variance must be positive")
+    if not 0 < config.max_weight <= 1:
+        raise ValueError("max_weight must be in (0, 1]")
+    if config.candidate_count < int(np.ceil(1.0 / config.max_weight)):
+        raise ValueError("candidate_count is too small for the max_weight constraint")
+    if not 0 < config.max_industry_weight <= 1:
+        raise ValueError("max_industry_weight must be in (0, 1]")
+    if not 0 <= config.shrinkage <= 1:
+        raise ValueError("shrinkage must be in [0, 1]")
+    if config.max_dates is not None and config.max_dates <= 0:
+        raise ValueError("max_dates must be positive when provided")
+
+
 def load_optimization_panel(config: OptimizationConfig) -> pd.DataFrame:
     if not config.expected_return_file.exists():
         raise FileNotFoundError(
-            f"{config.expected_return_file} does not exist. Run `.venv/bin/python 第二题/expected_return.py` first."
+            f"{config.expected_return_file} does not exist. Run `.venv/bin/python 二次规划组合优化/expected_return.py` first."
         )
     if not config.processed_data_file.exists():
         raise FileNotFoundError(
@@ -92,6 +116,20 @@ def load_optimization_panel(config: OptimizationConfig) -> pd.DataFrame:
 
 def make_return_matrix(panel: pd.DataFrame) -> pd.DataFrame:
     return panel.pivot(index="date", columns="code", values="realized_return").sort_index()
+
+
+def select_observable_return_history(
+    returns_wide: pd.DataFrame,
+    date: pd.Timestamp,
+    risk_window: int,
+) -> pd.DataFrame:
+    """Return labels observable when the signal dated ``date`` is formed."""
+    current_position = returns_wide.index.get_loc(date)
+    # Row T-1 contains the T-open to T+1-open return, which is not known
+    # when the T-close signal is formed.  The risk window must end at T-2.
+    history_end = max(0, current_position - 1)
+    history_start = max(0, history_end - risk_window)
+    return returns_wide.iloc[history_start:history_end]
 
 
 def estimate_covariance_matrix(
@@ -261,16 +299,20 @@ def summarize_portfolio_returns(
     if series.empty:
         return pd.DataFrame()
 
-    cumulative = series.cumsum()
-    drawdown = cumulative - cumulative.cummax()
+    net_value = (1.0 + series).cumprod()
+    drawdown = net_value / net_value.cummax() - 1.0
     std = series.std(ddof=1)
     summary = {
         "periods": len(series),
-        "total_additive_return": series.sum(),
-        "annual_return": series.mean() * config.trading_days_per_year,
+        "total_return": net_value.iloc[-1] - 1.0,
+        "annual_return": (
+            net_value.iloc[-1] ** (config.trading_days_per_year / len(series)) - 1.0
+            if net_value.iloc[-1] > 0
+            else np.nan
+        ),
         "annual_vol": std * np.sqrt(config.trading_days_per_year),
         "sharpe": series.mean() / std * np.sqrt(config.trading_days_per_year) if std > 0 else np.nan,
-        "max_drawdown_additive": drawdown.min(),
+        "max_drawdown": drawdown.min(),
         "win_rate": series.gt(0).mean(),
         "mean_expected_return": portfolio_returns["expected_return"].mean(),
         "mean_optimized_variance": portfolio_returns["optimized_variance"].mean(),
@@ -278,7 +320,46 @@ def summarize_portfolio_returns(
     return pd.DataFrame([summary])
 
 
+def plot_portfolio_cumulative_return(
+    portfolio_returns: pd.DataFrame,
+    output_file: Path,
+) -> None:
+    """Save the compounded portfolio cumulative-return curve."""
+    if portfolio_returns.empty:
+        return
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plot_data = portfolio_returns.dropna(subset=["date", "cumulative_return"]).copy()
+    if plot_data.empty:
+        return
+    plot_data["date"] = pd.to_datetime(plot_data["date"])
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(
+        plot_data["date"],
+        plot_data["cumulative_return"] * 100.0,
+        color="#1f77b4",
+        linewidth=1.8,
+        label="Optimized portfolio",
+    )
+    ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
+    ax.set_title("Optimized Portfolio Cumulative Return")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Cumulative return (%)")
+    ax.grid(alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_file, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+
+
 def run_optimization_backtest(config: OptimizationConfig) -> dict[str, pd.DataFrame]:
+    validate_config(config)
     panel = load_optimization_panel(config)
     returns_wide = make_return_matrix(panel)
     dates = returns_wide.index
@@ -292,7 +373,6 @@ def run_optimization_backtest(config: OptimizationConfig) -> dict[str, pd.DataFr
 
     panel_by_date = {date: group for date, group in panel.groupby("date", sort=False)}
     return_rows: list[dict[str, object]] = []
-    weight_frames: list[pd.DataFrame] = []
     report_rows: list[dict[str, object]] = []
 
     for date in dates:
@@ -305,8 +385,11 @@ def run_optimization_backtest(config: OptimizationConfig) -> dict[str, pd.DataFr
             report_rows.append({"date": date, "status": "too_few_candidates", "selected_count": len(candidates)})
             continue
 
-        current_position = returns_wide.index.get_loc(date)
-        history = returns_wide.iloc[max(0, current_position - config.risk_window) : current_position]
+        history = select_observable_return_history(
+            returns_wide,
+            date,
+            config.risk_window,
+        )
         history = history.reindex(columns=candidates["code"].tolist())
         covariance, valid_codes = estimate_covariance_matrix(history, config)
         if covariance is None:
@@ -339,29 +422,27 @@ def run_optimization_backtest(config: OptimizationConfig) -> dict[str, pd.DataFr
             }
         )
 
-        weights_df = candidates[
-            ["date", "code", config.factor_col, "expected_return", "realized_return", config.industry_col]
-        ].copy()
-        weights_df["weight"] = weights
-        weights_df = weights_df.loc[weights_df["weight"] > 1e-8]
-        weight_frames.append(weights_df)
-
     portfolio_returns = pd.DataFrame(return_rows)
     if not portfolio_returns.empty:
-        portfolio_returns["cumulative_return"] = portfolio_returns["realized_return"].cumsum()
-    portfolio_weights = pd.concat(weight_frames, ignore_index=True) if weight_frames else pd.DataFrame()
+        portfolio_returns["cumulative_return"] = (
+            (1.0 + portfolio_returns["realized_return"]).cumprod() - 1.0
+        )
     optimization_report = pd.DataFrame(report_rows)
     summary = summarize_portfolio_returns(portfolio_returns, config)
 
-    config.output_dir.mkdir(parents=True, exist_ok=True)
-    portfolio_returns.to_csv(config.output_dir / "portfolio_returns.csv", index=False)
-    portfolio_weights.to_parquet(config.output_dir / "portfolio_weights.parquet", index=False)
-    optimization_report.to_csv(config.output_dir / "optimization_report.csv", index=False)
-    summary.to_csv(config.output_dir / "portfolio_summary.csv", index=False)
+    plot_portfolio_cumulative_return(
+        portfolio_returns,
+        config.output_dir / "portfolio_cumulative_return.png",
+    )
+    if not summary.empty:
+        print("Portfolio summary:")
+        print(summary.to_string(index=False))
+    if not optimization_report.empty:
+        print("Optimization statuses:")
+        print(optimization_report["status"].value_counts(dropna=False).to_string())
 
     return {
         "portfolio_returns": portfolio_returns,
-        "portfolio_weights": portfolio_weights,
         "optimization_report": optimization_report,
         "portfolio_summary": summary,
     }
@@ -372,13 +453,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-return-file", type=Path, default=DEFAULT_EXPECTED_RETURN_FILE)
     parser.add_argument("--processed-data-file", type=Path, default=DEFAULT_PROCESSED_DATA_FILE)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--factor-col", default="factor_zscore")
+    parser.add_argument("--factor-col", default="factor_rank_zscore")
     parser.add_argument("--industry-col", default="industry_level1")
     parser.add_argument("--candidate-count", type=int, default=100)
     parser.add_argument("--risk-window", type=int, default=60)
     parser.add_argument("--min-history", type=int, default=20)
     parser.add_argument("--max-variance", type=float, default=0.0004)
-    parser.add_argument("--max-weight", type=float, default=0.05)
+    parser.add_argument("--max-weight", type=float, default=0.03)
     parser.add_argument("--max-industry-weight", type=float, default=0.20)
     parser.add_argument("--shrinkage", type=float, default=0.20)
     parser.add_argument("--start-date")

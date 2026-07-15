@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 
 from factor_analysis.config import PipelineConfig
@@ -17,8 +19,24 @@ from factor_analysis.constants import (
 from factor_analysis.utils import normalize_code
 
 
+def resolve_data_file(data_dir: Path, file_name: str) -> Path:
+    """Resolve both ``basic_data/file`` and ``basic_data/basic_data/file`` layouts."""
+    candidates = (data_dir / file_name, data_dir / "basic_data" / file_name)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    checked = ", ".join(str(path) for path in candidates)
+    raise FileNotFoundError(f"Cannot find {file_name}. Checked: {checked}")
+
+
 def load_daily_data(config: PipelineConfig) -> pd.DataFrame:
-    daily = pd.read_parquet(config.data_dir / DAILY_DATA_FILE, columns=DAILY_COLUMNS)
+    columns = list(DAILY_COLUMNS)
+    if config.benchmark_weight_col is not None:
+        columns.append(config.benchmark_weight_col)
+    daily = pd.read_parquet(
+        resolve_data_file(config.data_dir, DAILY_DATA_FILE),
+        columns=columns,
+    )
     daily = daily.rename(columns=RAW_DAILY_RENAME)
     daily = daily.reset_index().rename(columns={"DATE": "date", "CODE": "code"})
     daily["date"] = pd.to_datetime(daily["date"])
@@ -28,7 +46,7 @@ def load_daily_data(config: PipelineConfig) -> pd.DataFrame:
 
 
 def load_industry_data(config: PipelineConfig) -> pd.DataFrame:
-    industry = pd.read_parquet(config.data_dir / INDUSTRY_FILE)
+    industry = pd.read_parquet(resolve_data_file(config.data_dir, INDUSTRY_FILE))
     industry = industry.reset_index().rename(columns={"DATE": "date", "CODE": "code"})
     industry["date"] = pd.to_datetime(industry["date"].astype(str), format="%Y%m%d")
     industry["code"] = normalize_code(industry["code"])
@@ -46,7 +64,7 @@ def load_industry_data(config: PipelineConfig) -> pd.DataFrame:
 
 
 def load_st_flags(config: PipelineConfig) -> pd.DataFrame:
-    st = pd.read_parquet(config.data_dir / ST_FILE)
+    st = pd.read_parquet(resolve_data_file(config.data_dir, ST_FILE))
     st.index = pd.to_datetime(st.index.astype(str), format="%Y%m%d")
     st.columns = pd.Index(st.columns.astype(str)).str.zfill(6)
 
@@ -61,7 +79,7 @@ def load_st_flags(config: PipelineConfig) -> pd.DataFrame:
 
 
 def load_suspension_flags(config: PipelineConfig) -> pd.DataFrame:
-    suspension = pd.read_parquet(config.data_dir / SUSPENSION_FILE)
+    suspension = pd.read_parquet(resolve_data_file(config.data_dir, SUSPENSION_FILE))
     suspension = suspension.rename(
         columns={"股票代码": "code", "日期": "date", "是否停牌": "is_suspended"}
     )

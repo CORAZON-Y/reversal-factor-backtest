@@ -5,7 +5,10 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "basic_data"
-OUTPUT_DIR = ROOT_DIR / "output"
+OUTPUT_ROOT_DIR = ROOT_DIR / "output"
+OUTPUT_DIR = OUTPUT_ROOT_DIR / "单因子回测"
+CACHE_ROOT_DIR = ROOT_DIR / ".cache"
+FACTOR_CACHE_DIR = CACHE_ROOT_DIR / "单因子回测"
 
 DAILY_DATA_FILE = "daily_data.parquet"
 INDUSTRY_FILE = "industry.parquet"

@@ -1,0 +1,11 @@
+1.daily_data需要用到的字段：
+'DATE': 'date',
+'CODE':'code',
+'DY-ADJ_AF-OPEN_PRICE_2': 'open',
+'DY-ADJ_AF-HIGHEST_PRICE_2': 'high',
+'DY-ADJ_AF-LOWEST_PRICE_2': 'low',
+'DY-ADJ_AF-CLOSE_PRICE_2': 'close',
+'DY-BASIC-MARKET_VALUE';'市值'
+
+2.st中，除了空值外均为st
+

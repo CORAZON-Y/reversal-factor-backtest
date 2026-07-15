@@ -43,12 +43,10 @@ def plot_group_backtests(cumulative: pd.DataFrame, output_dir: Path) -> None:
         pivot = group.pivot(index="date", columns="portfolio", values="cumulative_return").sort_index()
         fig, ax = plt.subplots(figsize=(12, 6))
         for column in pivot.columns:
-            linewidth = 2.4 if column == "long_short" else 1.3
-            linestyle = "--" if column == "long_short" else "-"
-            ax.plot(pivot.index, pivot[column], label=column, linewidth=linewidth, linestyle=linestyle)
+            ax.plot(pivot.index, pivot[column], label=column, linewidth=1.3)
         ax.set_title(f"{factor} | {scope} | {weight}")
         ax.set_xlabel("Date")
-        ax.set_ylabel("Cumulative additive return")
+        ax.set_ylabel("Net value")
         ax.legend(ncol=3)
         ax.grid(alpha=0.25)
         fig.tight_layout()

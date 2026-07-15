@@ -9,20 +9,33 @@ import pandas as pd
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_INPUT_FILE = ROOT_DIR / "output" / "processed_data.parquet"
-DEFAULT_OUTPUT_FILE = ROOT_DIR / "第二题" / "expected_returns.parquet"
-DEFAULT_FACTOR_RETURN_FILE = ROOT_DIR / "第二题" / "expected_factor_returns.csv"
+CACHE_ROOT_DIR = ROOT_DIR / ".cache"
+FACTOR_CACHE_DIR = CACHE_ROOT_DIR / "单因子回测"
+OPTIMIZATION_CACHE_DIR = CACHE_ROOT_DIR / "二次规划组合优化"
+DEFAULT_INPUT_FILE = FACTOR_CACHE_DIR / "processed_data.parquet"
+DEFAULT_OUTPUT_FILE = OPTIMIZATION_CACHE_DIR / "expected_returns.parquet"
 
 
 @dataclass(frozen=True)
 class ExpectedReturnConfig:
     input_file: Path = DEFAULT_INPUT_FILE
     output_file: Path = DEFAULT_OUTPUT_FILE
-    factor_return_file: Path = DEFAULT_FACTOR_RETURN_FILE
-    factor_col: str = "factor_zscore"
+    factor_col: str = "factor_rank_zscore"
     return_col: str = "return"
     window: int = 60
     min_periods: int = 20
+    return_availability_lag: int = 2
+
+
+def validate_config(config: ExpectedReturnConfig) -> None:
+    if config.window <= 0:
+        raise ValueError("window must be positive")
+    if config.min_periods <= 0 or config.min_periods > config.window:
+        raise ValueError("min_periods must be between 1 and window")
+    if config.return_availability_lag < 2:
+        raise ValueError(
+            "return_availability_lag must be at least 2 for T+1-open to T+2-open returns"
+        )
 
 
 def load_factor_panel(config: ExpectedReturnConfig) -> pd.DataFrame:
@@ -59,7 +72,9 @@ def estimate_daily_factor_returns(
     factor_returns = pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
     factor_returns["beta_hat"] = (
         factor_returns["realized_beta"]
-        .shift(1)
+        # A factor dated T earns the T+1-open to T+2-open return.  When the
+        # T signal is formed, the latest fully observed label is therefore T-2.
+        .shift(config.return_availability_lag)
         .rolling(config.window, min_periods=config.min_periods)
         .mean()
     )
@@ -90,20 +105,18 @@ def predict_expected_returns(
 
 def save_expected_return_outputs(
     expected_returns: pd.DataFrame,
-    factor_returns: pd.DataFrame,
     config: ExpectedReturnConfig,
 ) -> None:
     config.output_file.parent.mkdir(parents=True, exist_ok=True)
-    config.factor_return_file.parent.mkdir(parents=True, exist_ok=True)
     expected_returns.to_parquet(config.output_file, index=False)
-    factor_returns.to_csv(config.factor_return_file, index=False)
 
 
 def run_expected_return_model(config: ExpectedReturnConfig) -> dict[str, pd.DataFrame]:
+    validate_config(config)
     panel = load_factor_panel(config)
     factor_returns = estimate_daily_factor_returns(panel, config)
     expected_returns = predict_expected_returns(panel, factor_returns, config)
-    save_expected_return_outputs(expected_returns, factor_returns, config)
+    save_expected_return_outputs(expected_returns, config)
     return {
         "expected_returns": expected_returns,
         "factor_returns": factor_returns,
@@ -111,13 +124,18 @@ def run_expected_return_model(config: ExpectedReturnConfig) -> dict[str, pd.Data
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Estimate expected stock returns from factor_zscore.")
+    parser = argparse.ArgumentParser(description="Estimate expected stock returns from factor_rank_zscore.")
     parser.add_argument("--input-file", type=Path, default=DEFAULT_INPUT_FILE)
     parser.add_argument("--output-file", type=Path, default=DEFAULT_OUTPUT_FILE)
-    parser.add_argument("--factor-return-file", type=Path, default=DEFAULT_FACTOR_RETURN_FILE)
-    parser.add_argument("--factor-col", default="factor_zscore")
+    parser.add_argument("--factor-col", default="factor_rank_zscore")
     parser.add_argument("--window", type=int, default=60)
     parser.add_argument("--min-periods", type=int, default=20)
+    parser.add_argument(
+        "--return-availability-lag",
+        type=int,
+        default=2,
+        help="Number of factor-date rows before a realized return is observable.",
+    )
     return parser.parse_args()
 
 
@@ -126,10 +144,10 @@ def main() -> dict[str, pd.DataFrame]:
     config = ExpectedReturnConfig(
         input_file=args.input_file,
         output_file=args.output_file,
-        factor_return_file=args.factor_return_file,
         factor_col=args.factor_col,
         window=args.window,
         min_periods=args.min_periods,
+        return_availability_lag=args.return_availability_lag,
     )
     return run_expected_return_model(config)
 
